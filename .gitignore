@@ -1,0 +1,9 @@
+chatbot/.env
+**/__pycache__/
+**/*.pyc
+chatbot/.streamlit/
+chatbot/venv/
+chatbot/.venv/
+.env
+venv/
+.venv/

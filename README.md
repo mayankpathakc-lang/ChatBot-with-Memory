@@ -1,6 +1,6 @@
 # 💬 Memory Chatbot
 
-A minimal, heavily-commented Streamlit chatbot built for **learning**.  It teaches three concepts through working code:
+A minimal, heavily-commented Streamlit chatbot built for **learning**. It teaches three concepts through working code:
 
 | Concept | Where to look |
 |---|---|
@@ -29,7 +29,11 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Open `.env` and replace `your_key_here` with your [Anthropic API key](https://console.anthropic.com/).
+Open `.env` and replace `your_key_here` with your **[Google AI Studio API key](https://aistudio.google.com/)** (which is completely free!).
+
+```env
+GEMINI_API_KEY=your_key_here
+```
 
 ### 4. Run the app
 
@@ -51,12 +55,17 @@ Here's the data flow for every message you send:
 │     └─► Appended to  st.session_state.messages               │
 │                                                              │
 │  2. format_messages(history)                                 │
-│     └─► Returns the list as [{"role": …, "content": …}, …]  │
+│     └─► Translates:                                          │
+│         - "assistant" role to "model"                        │
+│         - Content text to {"parts": [{"text": …}]}           │
 │                                                              │
 │  3. API call                                                 │
-│     └─► client.messages.create(                              │
-│              system = "<system prompt>",                      │
-│              messages = <formatted history>                   │
+│     └─► client.models.generate_content(                      │
+│              model = "gemini-2.5-flash",                     │
+│              contents = <formatted history>,                 │
+│              config = GenerateContentConfig(                 │
+│                  system_instruction = "<system prompt>"      │
+│              )                                               │
 │         )                                                    │
 │     The FULL history is sent every time because the API is   │
 │     stateless — it has no server-side memory.                │
@@ -73,11 +82,11 @@ Streamlit re-executes the entire `app.py` script on every interaction. Normal Py
 
 ### Why send the full history?
 
-Chat APIs like Claude and GPT are **stateless**. The server forgets everything between requests. The only way the model "remembers" your conversation is if you send every prior turn in the `messages` list. This is also why very long conversations eventually need **truncation** — the model has a finite context window.
+Chat APIs like Gemini are **stateless**. The server forgets everything between requests. The only way the model "remembers" your conversation is if you send every prior turn in the `contents` list. This is also why very long conversations eventually need **truncation** — the model has a finite context window.
 
 ### Why is the system prompt separate?
 
-The system prompt sets the model's persona/instructions and is separate from the user↔assistant turns. In the Anthropic API it's a top-level `system` parameter; in OpenAI's API it's the first message with `role: "system"`. Either way, keeping it separate makes it easy to swap behaviors without touching the conversation history.
+The system prompt sets the model's persona/instructions and is separate from the user↔model turns. In the Gemini API it's a configuration parameter (`system_instruction`). Keeping it separate makes it easy to swap behaviors without touching the conversation history.
 
 ---
 

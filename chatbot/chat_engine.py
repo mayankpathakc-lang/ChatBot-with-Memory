@@ -1,6 +1,6 @@
 """
-chat_engine.py — Prompt Formatting + API Call Logic
-=====================================================
+chat_engine.py — Prompt Formatting + API Call Logic (Gemini Edition)
+======================================================================
 
 This is the educational core of the project. It answers two questions:
 
@@ -16,7 +16,8 @@ Streamlit's session_state and pass it here on every turn.
 
 import os
 from dotenv import load_dotenv
-import anthropic
+from google import genai
+from google.genai import types
 
 # ---------------------------------------------------------------------------
 # 1. Load API key
@@ -25,24 +26,23 @@ import anthropic
 # never hard-code secrets in source code.
 load_dotenv()
 
-_api_key = os.getenv("ANTHROPIC_API_KEY")
+_api_key = os.getenv("GEMINI_API_KEY")
 
-# We create the client once at module level.  If the key is missing we
+# We create the client once at module level. If the key is missing we
 # defer the error to get_response() so the Streamlit UI can show a
 # friendly message instead of crashing on import.
-_client = anthropic.Anthropic(api_key=_api_key) if _api_key else None
+_client = genai.Client(api_key=_api_key) if _api_key else None
 
 
 # ---------------------------------------------------------------------------
 # 2. System Prompt
 # ---------------------------------------------------------------------------
-# The system prompt is *separate* from user/assistant turns.  It acts as
+# The system prompt is *separate* from user/model turns. It acts as
 # persistent instructions that shape every reply — like giving the model a
 # "role card" before the conversation starts.
 #
-# In the Anthropic API, `system` is a top-level parameter, NOT a message
-# in the messages list.  (OpenAI puts it as the first message with
-# role="system" — same idea, different shape.)
+# In the Gemini API, the system prompt is passed in the request configuration
+# object as `system_instruction`.
 #
 # We expose it as a module-level constant so app.py can let the user
 # edit it at runtime — a great way to see how the system prompt steers
@@ -61,38 +61,54 @@ DEFAULT_SYSTEM_PROMPT = (
 def format_messages(history: list[dict]) -> list[dict]:
     """
     Take the raw session history and return it in the exact shape
-    the Anthropic messages API expects.
+    the Gemini contents API expects.
 
-    Our session history already stores entries as:
+    Our session history stores entries as:
         {"role": "user" | "assistant", "content": "..."}
 
-    The Anthropic API wants the same shape, so right now this function
-    is a thin pass-through.  But having it as a separate step is
-    intentional — it's the place where you would:
-      • Trim old messages to fit the context window
-      • Inject few-shot examples
-      • Convert tool-use results into the right format
+    But Gemini API expects:
+      - The role name for the assistant to be "model" instead of "assistant".
+      - The message content to be wrapped inside a "parts" list containing
+        text blocks: {"role": "user" | "model", "parts": [{"text": "..."}]}
+
+    This translation is the main reason format_messages() exists!
 
     ── What the final payload looks like ──────────────────────────
     The API call sends a JSON body roughly like this:
 
         {
-          "model": "claude-sonnet-4-20250514",
-          "max_tokens": 1024,
-          "system": "<system prompt string>",    ← top-level, not a message
-          "messages": [
-              {"role": "user",      "content": "Hi, who are you?"},
-              {"role": "assistant", "content": "I'm a coding assistant..."},
-              {"role": "user",      "content": "Explain decorators."}
+          "model": "gemini-2.5-flash",
+          "config": {
+              "system_instruction": "<system prompt string>"  ← separate config
+          },
+          "contents": [
+              {
+                  "role": "user",
+                  "parts": [{"text": "Hi, who are you?"}]
+              },
+              {
+                  "role": "model",
+                  "parts": [{"text": "I'm a coding assistant..."}]
+              },
+              {
+                  "role": "user",
+                  "parts": [{"text": "Explain decorators."}]
+              }
           ]
         }
 
-    Notice: the messages list alternates user → assistant → user.
-    The system prompt is NOT in this list — it's a separate field.
+    Notice: the contents list alternates user → model → user.
     ────────────────────────────────────────────────────────────────
     """
-    # Return a clean copy so we never accidentally mutate session state.
-    return [{"role": msg["role"], "content": msg["content"]} for msg in history]
+    formatted = []
+    for msg in history:
+        # Translate role "assistant" to "model" for Gemini
+        role = "user" if msg["role"] == "user" else "model"
+        formatted.append({
+            "role": role,
+            "parts": [{"text": msg["content"]}]
+        })
+    return formatted
 
 
 # ---------------------------------------------------------------------------
@@ -100,60 +116,61 @@ def format_messages(history: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 def get_response(history: list[dict], system_prompt: str | None = None) -> str:
     """
-    Send the full conversation history to the Anthropic API and return
-    the assistant's reply as a plain string.
+    Send the full conversation history to the Gemini API and return
+    the model's reply as a plain string.
 
     Parameters
     ----------
     history : list[dict]
         The full conversation so far (user + assistant turns).
     system_prompt : str | None
-        Override the default system prompt.  Useful for the sidebar
+        Override the default system prompt. Useful for the sidebar
         "edit system prompt" feature in app.py.
 
     Why pass the FULL history every time?
     -------------------------------------
     Chat APIs are stateless — the server forgets everything between
-    requests.  The only way the model "remembers" the conversation is
-    if we send every prior turn in the `messages` list.  This is also
+    requests. The only way the model "remembers" the conversation is
+    if we send every prior turn in the `contents` list. This is also
     why very long conversations eventually need *truncation*: the
-    model has a finite context window (e.g., 200k tokens for Claude),
-    and sending too many messages will hit that limit.
+    model has a finite context window, and sending too many messages
+    will hit that limit.
     """
     # --- Guard: missing API key -------------------------------------------
     if _client is None:
         return (
-            "⚠️ **API key not found.**\n\n"
+            "⚠️ **Gemini API key not found.**\n\n"
             "1. Copy `.env.example` to `.env`\n"
-            "2. Paste your Anthropic API key\n"
+            "2. Paste your Google AI Studio API key in `GEMINI_API_KEY`\n"
             "3. Restart the app (`streamlit run app.py`)"
         )
 
     # --- Build the request ------------------------------------------------
     prompt = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT
-    messages = format_messages(history)
+    contents = format_messages(history)
 
     try:
-        response = _client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            system=prompt,          # ← system prompt lives here, not in messages
-            messages=messages,      # ← the full conversation history
+        response = _client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents,      # ← the full conversation history
+            config=types.GenerateContentConfig(
+                system_instruction=prompt  # ← system prompt lives here
+            )
         )
 
-        # The response object wraps content in a list of content blocks.
-        # For a plain text reply there is one TextBlock at index 0.
-        return response.content[0].text
+        # Return the generated text reply
+        if response.text:
+            return response.text
+        else:
+            return "⚠️ **Empty response received from the model.**"
 
-    except anthropic.AuthenticationError:
-        return (
-            "🔑 **Authentication failed.** "
-            "Double-check the API key in your `.env` file."
-        )
-    except anthropic.RateLimitError:
-        return "⏳ **Rate limited.** Wait a moment and try again."
-    except anthropic.APIError as e:
-        return f"❌ **API error:** {e}"
     except Exception as e:
         # Catch-all so the app never crashes — we always return a string.
-        return f"❌ **Unexpected error:** {e}"
+        # This will catch auth errors, rate limits, network errors, etc.
+        error_msg = str(e)
+        if "API_KEY_INVALID" in error_msg:
+            return (
+                "🔑 **Authentication failed.** "
+                "Double-check the API key in your `.env` file."
+            )
+        return f"❌ **Unexpected error:** {error_msg}"
